@@ -10,3 +10,6 @@ ambient-sounds.lua
 
 # Built mod packages
 *.zip
+
+# Shareable zips built by package.ps1
+dist/

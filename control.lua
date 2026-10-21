@@ -1,8 +1,10 @@
--- Music controls: Previous / Next / Shuffle buttons and the current track name, per player.
+-- Music controls: Previous / Next / Shuffle / Stop / Mute music buttons and the current track name, per player.
 --
 -- Shuffle on: the game picks tracks itself (weighted random, with interludes in between); Next picks a random track.
 -- Shuffle off: when a track ends, the next one in album order (by title) is played instead.
 -- The playlist is every main and hero track allowed on the player's current surface.
+-- The API cannot stop music, so Stop and Mute play a silent script track (data.lua), replay it when it ends and
+-- replace any track the game starts. Stop remembers the track; Play starts it again (there is no seek).
 
 local mod_gui = require("mod-gui")
 
@@ -11,6 +13,9 @@ local HISTORY_SIZE = 50
 -- Button switches: every transition phase set explicitly (in ticks). Left out, the engine's defaults apply,
 -- which made a switch take about 10 seconds.
 local FADE = {skip_natural_pause = true, delay_duration = 0, fade_out_duration = 30, pause_duration = 0, fade_in_duration = 15}
+-- While muted: cut a track the game starts at once, and chain the silence without the pause between tracks.
+local SNAP = {skip_natural_pause = true, delay_duration = 0, fade_out_duration = 0, pause_duration = 0, fade_in_duration = 0}
+local SILENCE = "sa-music-silence"
 
 -- Album order: by title, so "Vulcanus 2" comes after "Vulcanus 1".
 local ORDER = {}
@@ -80,10 +85,10 @@ local function remember(pd, name)
   pd.pos = #pd.history
 end
 
-local function play(player, pd, name)
+local function play(player, pd, name, transition)
   pd.expected = name
   local spec = {name = name}
-  for k, v in pairs(FADE) do spec[k] = v end
+  for k, v in pairs(transition or FADE) do spec[k] = v end
   player.play_music(spec)
 end
 
@@ -107,33 +112,80 @@ local function random_track(player, pd)
   return candidates[math.random(#candidates)]
 end
 
+local function play_next(player, pd)
+  local name
+  if pd.pos < #pd.history then
+    pd.pos = pd.pos + 1 -- step forward again after Previous
+    name = pd.history[pd.pos]
+  else
+    local current = player.current_music
+    if current == "" or current == SILENCE then current = pd.history[pd.pos] end
+    name = setting(player, "sa-music-shuffle") and random_track(player, pd) or next_in_order(player, current)
+    remember(pd, name)
+  end
+  play(player, pd, name)
+end
+
 -- GUI -------------------------------------------------------------------------------------------------------------
 
+-- The player sits in player.gui.left (a vertical flow) right below mod-gui's frame flow, so it stacks under other
+-- mods' panels; inside the shared mod-gui flow it would be placed beside them.
 local function gui_destroy(player)
-  local frame = mod_gui.get_frame_flow(player).sa_music_frame
+  local frame = player.gui.left.sa_music_frame
+  if frame then frame.destroy() end
+  frame = mod_gui.get_frame_flow(player).sa_music_frame -- placed there by older versions
   if frame then frame.destroy() end
 end
 
 local function gui_update(player)
-  local frame = mod_gui.get_frame_flow(player).sa_music_frame
+  local frame = player.gui.left.sa_music_frame
   local row = frame and frame.sa_music_row
   if not row then return end
-  if row.sa_music_title then row.sa_music_title.caption = {"", "♫ ", track_title(player.current_music)} end
-  local shuffle = row.sa_music_buttons and row.sa_music_buttons.sa_music_shuffle
-  if shuffle then
-    local on = setting(player, "sa-music-shuffle")
-    shuffle.toggled = on
-    shuffle.tooltip = {on and "sa-music.shuffle-on" or "sa-music.shuffle-off"}
+  local pd = pdata(player)
+  local muted, stopped = pd.muted, pd.stopped
+  if row.sa_music_title then
+    local current = player.current_music
+    local title
+    if muted then title = {"sa-music.muted"}
+    elseif stopped then title = {"", track_title(stopped), " ", {"sa-music.stopped"}}
+    else title = track_title(current ~= SILENCE and current or nil) end
+    row.sa_music_title.caption = {"", "♫ ", title}
   end
+  local buttons = row.sa_music_buttons
+  if not buttons then return end
+  local on = setting(player, "sa-music-shuffle")
+  buttons.sa_music_shuffle.toggled = on
+  buttons.sa_music_shuffle.tooltip = {on and "sa-music.shuffle-on" or "sa-music.shuffle-off"}
+  buttons.sa_music_stop.sprite = stopped and "utility/play" or "utility/stop"
+  buttons.sa_music_stop.tooltip = {stopped and "sa-music.play" or "sa-music.stop"}
+  buttons.sa_music_mute.toggled = muted or false
+  buttons.sa_music_mute.sprite = muted and "utility/side_menu_master_mute_muted_icon" or "utility/side_menu_master_mute_unmuted_icon"
+  buttons.sa_music_mute.tooltip = {muted and "sa-music.mute-on" or "sa-music.mute-off"}
+end
+
+-- Button in the top-left mod button bar (as used by Factory Planner) that opens and closes the player.
+-- It is highlighted (toggled) while the player is open.
+local function toggle_button(player)
+  local flow = mod_gui.get_button_flow(player)
+  local button = flow.sa_music_toggle
+  if not button then
+    button = flow.add{type = "button", name = "sa_music_toggle", style = mod_gui.button_style, caption = "♫", tooltip = {"sa-music.toggle"}, auto_toggle = false, mouse_button_filter = {"left"}}
+    button.style.font = "default-large-semibold"
+  end
+  return button
 end
 
 local function gui_build(player)
   gui_destroy(player)
+  local open = pdata(player).open ~= false -- open unless closed with the button
+  toggle_button(player).toggled = open
   local show_controls = setting(player, "sa-music-show-controls")
   local show_title = setting(player, "sa-music-show-title")
-  if not (show_controls or show_title) then return end
+  if not open or not (show_controls or show_title) then return end
 
-  local frame = mod_gui.get_frame_flow(player).add{type = "frame", name = "sa_music_frame", style = mod_gui.frame_style, direction = "horizontal"}
+  local left = player.gui.left
+  local index = mod_gui.get_frame_flow(player).get_index_in_parent() + 1
+  local frame = left.add{type = "frame", name = "sa_music_frame", style = mod_gui.frame_style, direction = "horizontal", index = index}
   -- Spacing and alignment are flow style properties; a frame style rejects them.
   local row = frame.add{type = "flow", name = "sa_music_row", direction = "horizontal"}
   row.style.vertical_align = "center"
@@ -144,6 +196,8 @@ local function gui_build(player)
     buttons.add{type = "sprite-button", name = "sa_music_previous", style = "tool_button", sprite = "utility/backward_arrow_black", tooltip = {"sa-music.previous"}}
     buttons.add{type = "sprite-button", name = "sa_music_next", style = "tool_button", sprite = "utility/forward_arrow_black", tooltip = {"sa-music.next"}}
     buttons.add{type = "sprite-button", name = "sa_music_shuffle", style = "tool_button", sprite = "utility/shuffle", auto_toggle = false}
+    buttons.add{type = "sprite-button", name = "sa_music_stop", style = "tool_button"}
+    buttons.add{type = "sprite-button", name = "sa_music_mute", style = "tool_button", auto_toggle = false}
   end
   if show_title then
     row.add{type = "label", name = "sa_music_title", style = "label"}
@@ -168,6 +222,10 @@ script.on_configuration_changed(function()
 end)
 
 script.on_event(defines.events.on_player_created, function(e) init_player(game.get_player(e.player_index)) end)
+-- The music isn't shipped with the mod; until the player has copied it from their game, say how.
+script.on_event(defines.events.on_player_joined_game, function(e)
+  if prototypes.mod_data["sa-music-status"].data.missing then game.get_player(e.player_index).print({"sa-music.music-missing"}) end
+end)
 script.on_event(defines.events.on_player_removed, function(e) if storage.players then storage.players[e.player_index] = nil end end)
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(e)
@@ -184,9 +242,13 @@ script.on_event(defines.events.on_player_music_changed, function(e)
   if current ~= "" then
     if current == pd.expected then
       pd.expected = nil -- started by our buttons; history already handled
+    elseif pd.muted or pd.stopped then
+      play(player, pd, SILENCE, SNAP) -- the game started a track
     else
       remember(pd, current)
     end
+  elseif pd.muted or pd.stopped then
+    play(player, pd, SILENCE, SNAP) -- the silence ended: keep it going
   elseif not setting(player, "sa-music-shuffle") then
     -- A track just finished: continue in album order instead of the game's random pick.
     local last = pd.history[pd.pos]
@@ -207,25 +269,46 @@ script.on_event(defines.events.on_gui_click, function(e)
   local player = game.get_player(e.player_index)
   local pd = pdata(player)
 
-  if element.name == "sa_music_shuffle" then
+  if element.name == "sa_music_toggle" then
+    pd.open = pd.open == false -- nil (default) counts as open
+    gui_build(player)
+
+  elseif element.name == "sa_music_shuffle" then
     player.mod_settings["sa-music-shuffle"] = {value = not setting(player, "sa-music-shuffle")}
     gui_update(player)
 
   elseif element.name == "sa_music_next" then
-    local name
-    if pd.pos < #pd.history then
-      pd.pos = pd.pos + 1 -- step forward again after Previous
-      name = pd.history[pd.pos]
-    else
-      local current = player.current_music ~= "" and player.current_music or pd.history[pd.pos]
-      name = setting(player, "sa-music-shuffle") and random_track(player, pd) or next_in_order(player, current)
-      remember(pd, name)
-    end
-    play(player, pd, name)
+    pd.muted, pd.stopped = nil, nil
+    play_next(player, pd)
+    gui_update(player)
 
   elseif element.name == "sa_music_previous" then
+    pd.muted, pd.stopped = nil, nil
     if pd.pos > 1 then pd.pos = pd.pos - 1 end
     local name = pd.history[pd.pos]
-    if name then play(player, pd, name) end -- at the start of the history: restart the oldest track
+    if name then play(player, pd, name) else play_next(player, pd) end -- at the start of the history: restart the oldest track
+    gui_update(player)
+
+  elseif element.name == "sa_music_stop" then
+    if pd.stopped then
+      -- Play: the API has no seek, so the stopped track starts again from the beginning.
+      local name = pd.stopped
+      pd.stopped = nil
+      if not pd.muted then
+        if name ~= "" then play(player, pd, name) else play_next(player, pd) end
+      end
+    else
+      local current = player.current_music
+      if current == "" or current == SILENCE then current = pd.history[pd.pos] end
+      pd.stopped = current or "" -- "" = nothing had played yet
+      if not pd.muted then play(player, pd, SILENCE) end
+    end
+    gui_update(player)
+
+  elseif element.name == "sa_music_mute" then
+    pd.muted = not pd.muted or nil
+    if pd.muted then play(player, pd, SILENCE)
+    elseif not pd.stopped then play_next(player, pd) end
+    gui_update(player)
   end
 end)

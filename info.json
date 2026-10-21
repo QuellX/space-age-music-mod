@@ -1,9 +1,9 @@
 {
   "name": "sa-music-on-nauvis",
-  "version": "1.2.3",
+  "version": "1.3.0",
   "title": "Space Age Music on Nauvis",
   "author": "Quell",
-  "description": "Plays the Space Age soundtrack (Vulcanus, Fulgora, Gleba, Aquilo and space platform music) in games where the Space Age mod is disabled. The music is copied from your own Space Age installation by build.ps1; it is not included in this mod's source and must not be redistributed. Does nothing while Space Age is enabled.",
+  "description": "Plays the Space Age soundtrack (Vulcanus, Fulgora, Gleba, Aquilo and space platform music) in games where the Space Age mod is disabled. The music is not included: unzip the mod and copy it from your own Factorio installation (see the mod page). With Space Age enabled it leaves the music alone, and the music player still works.",
   "factorio_version": "2.1",
   "dependencies": [
     "base >= 2.1",
